@@ -1,10 +1,16 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
-
+import (
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
+	"io/ioutil"
+	"log"
+	"net/rpc"
+	"os"
+	"sort"
+	"time"
+)
 
 //
 // Map functions return a slice of KeyValue.
@@ -13,6 +19,14 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // use ihash(key) % NReduce to choose the reduce
@@ -24,7 +38,6 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
@@ -35,7 +48,87 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// uncomment to send the Example RPC to the master.
 	// CallExample()
+	ticker := time.NewTicker(time.Second)
+	log.Println("work run")
+	var mapOk bool
+	for {
+		<-ticker.C
+		if !mapOk {
+			log.Println("start call")
+			ok := CallPhaseOk(mapPhase)
+			log.Printf("work run ret:%v---\n", ok)
+			mapOk = ok
+		}
+		var task *TaskReply
+		if mapOk {
+			task = CallGetTasks(reducePhase)
+			ri := task.Index
+			kva := []KeyValue{}
+			for i := 0; i < task.Nfiles; i++ {
+				filename := fmt.Sprintf("mr-%d-%d", i, ri)
+				file, err := os.Open(filename)
+				if err != nil {
+					log.Fatalf("open file:%s err:%v", filename, err)
+				}
+				dec := json.NewDecoder(file)
+				for {
+					var kv KeyValue
+					if err := dec.Decode(&kv); err != nil {
+						break
+					}
+					kva = append(kva, kv)
+				}
+			}
+			oname := fmt.Sprintf("mr-out-%d", task.Index)
+			ofile, _ := os.Create(oname)
+			sort.Sort(ByKey(kva))
+			i := 0
+			for i < len(kva) {
+				j := i + 1
+				for j < len(kva) && kva[j].Key == kva[i].Key {
+					j++
+				}
+				values := []string{}
+				for k := i; k < j; k++ {
+					values = append(values, kva[k].Value)
+				}
+				output := reducef(kva[i].Key, values)
+				fmt.Fprintf(ofile, "%v %v\n", kva[i].Key, output)
+				i = j
+			}
+			ofile.Close()
 
+			CallFinishTask(reducePhase, task.Index)
+		} else {
+			log.Println("get tasks begin")
+			task = CallGetTasks(mapPhase)
+			log.Printf("get tasks:%v\n", task)
+			filename := task.File
+			file, err := os.Open(filename)
+			if err != nil {
+				log.Fatalf("cannot open %v", filename)
+			}
+			content, err := ioutil.ReadAll(file)
+			if err != nil {
+				log.Fatalf("cannot read %v", filename)
+			}
+			file.Close()
+			kva := mapf(filename, string(content))
+			// sort.Sort(ByKey(kva))
+			for _, kv := range kva {
+				fi := ihash(kv.Key) % task.NReduce
+				outfname := fmt.Sprintf("mr-%d-%d", task.Index, fi)
+				outfile, _ := os.OpenFile(outfname, os.O_CREATE|os.O_WRONLY, os.ModePerm)
+				enc := json.NewEncoder(outfile)
+				err = enc.Encode(&kv)
+				if err != nil {
+					log.Fatalf("json encode err:%v", err)
+				}
+				outfile.Close()
+			}
+			CallFinishTask(mapPhase, task.Index)
+		}
+	}
 }
 
 //
@@ -59,6 +152,34 @@ func CallExample() {
 
 	// reply.Y should be 100.
 	fmt.Printf("reply.Y %v\n", reply.Y)
+}
+
+func CallGetTasks(phase string) *TaskReply {
+	args := TaskArgs{
+		Phase: phase,
+	}
+	reply := TaskReply{}
+	suc := call("Master.GetTasks", &args, &reply)
+	log.Printf("call api ret:%v", suc)
+	return &reply
+}
+
+func CallFinishTask(phase string, index int) {
+	args := &FinishArgs{
+		Index: index,
+		Phase: phase,
+	}
+	reply := &FinishReply{}
+	call("Master.FinishTask", args, reply)
+}
+
+func CallPhaseOk(phase string) bool {
+	args := &OkArgs{
+		Phase: phase,
+	}
+	rep := &OkReply{}
+	call("Master.Ok", args, rep)
+	return rep.Ok
 }
 
 //
