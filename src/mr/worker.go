@@ -79,6 +79,12 @@ func Worker(mapf func(string, string) []KeyValue,
 				return
 			}
 			task = CallGetTasks(reducePhase)
+			if task.Nfiles == 0 { //reduce任务已经完成
+				continue
+			}
+			if task.Finished {
+				return
+			}
 			ri := task.Index
 			log.Printf("reduce index:%d\n", ri)
 			kva := []KeyValue{}
@@ -102,7 +108,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			var ofile *os.File
 			if !exists(oname) {
 				ofile, _ = os.Create(oname)
-			} else {
+			} else { //如果reduce已经执行成功拉取到重复job直接跳过
 				continue
 			}
 			sort.Sort(ByKey(kva))

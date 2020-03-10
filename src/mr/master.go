@@ -80,6 +80,12 @@ func (m *Master) monitorTask() {
 func (m *Master) getRunnableTask(tasks []*taskState, phase string) (rep *TaskReply) {
 	m.lock.Lock()
 	defer m.lock.Unlock()
+	if m.reduceOk {
+		rep = &TaskReply{
+			Finished: true,
+		}
+		return
+	}
 	for i, task := range tasks {
 		if !task.running && !task.ok {
 			rep = &TaskReply{
@@ -132,7 +138,7 @@ func (m *Master) GetTasks(args *TaskArgs, reply *TaskReply) error {
 			reply.NReduce = ret.NReduce
 			reply.Nfiles = ret.Nfiles
 		} else {
-			reply.File = ""
+			reply.Nfiles = 0
 		}
 
 	default:

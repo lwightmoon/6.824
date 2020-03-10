@@ -35,11 +35,12 @@ type TaskArgs struct {
 	Phase string
 }
 type TaskReply struct {
-	File    string
-	Phase   string
-	Index   int
-	NReduce int
-	Nfiles  int
+	File     string
+	Phase    string
+	Index    int
+	NReduce  int
+	Nfiles   int
+	Finished bool
 }
 
 type FinishArgs struct {
