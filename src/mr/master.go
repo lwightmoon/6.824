@@ -2,7 +2,6 @@ package mr
 
 import (
 	"errors"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -27,6 +26,7 @@ type Master struct {
 	reduceOk bool
 	nReduce  int
 	nFiles   int
+	stop     chan struct{}
 }
 
 func (m *Master) isTasksOk(tasks []*taskState) bool {
@@ -48,7 +48,7 @@ func (m *Master) monitorTask() {
 		now := time.Now().Unix()
 		var ok = true
 		for _, task := range m.mTasks {
-			if task.running && now-task.start > 10 {
+			if !task.ok && (task.running && now-task.start > 10) {
 				task.running = false
 				ok = false
 				continue
@@ -64,7 +64,7 @@ func (m *Master) monitorTask() {
 		now := time.Now().Unix()
 		var ok = true
 		for _, task := range m.mReduces {
-			if task.running && now-task.start > 10 {
+			if !task.ok && (task.running && now-task.start > 10) {
 				task.running = false
 				ok = false
 				continue
@@ -73,7 +73,7 @@ func (m *Master) monitorTask() {
 				ok = false
 			}
 		}
-		m.mapOk = ok
+		m.reduceOk = ok
 	}
 }
 
@@ -114,19 +114,27 @@ func (m *Master) GetTasks(args *TaskArgs, reply *TaskReply) error {
 	switch args.Phase {
 	case mapPhase:
 		ret := m.getRunnableTask(m.mTasks, mapPhase)
-		reply.File = ret.File
-		reply.Phase = ret.Phase
-		reply.Index = ret.Index
-		reply.NReduce = ret.NReduce
-		reply.Nfiles = ret.Nfiles
-		fmt.Printf("task file:%s", reply.File)
+		if ret != nil {
+			reply.File = ret.File
+			reply.Phase = ret.Phase
+			reply.Index = ret.Index
+			reply.NReduce = ret.NReduce
+			reply.Nfiles = ret.Nfiles
+		} else {
+			reply.File = ""
+		}
 	case reducePhase:
 		ret := m.getRunnableTask(m.mReduces, reducePhase)
-		reply.File = ret.File
-		reply.Phase = ret.Phase
-		reply.Index = ret.Index
-		reply.NReduce = ret.NReduce
-		reply.Nfiles = ret.Nfiles
+		if ret != nil {
+			reply.File = ret.File
+			reply.Phase = ret.Phase
+			reply.Index = ret.Index
+			reply.NReduce = ret.NReduce
+			reply.Nfiles = ret.Nfiles
+		} else {
+			reply.File = ""
+		}
+
 	default:
 		return errors.New("task arg err")
 	}
@@ -154,13 +162,9 @@ func (m *Master) Ok(args *OkArgs, reply *OkReply) error {
 	defer m.lock.Unlock()
 	switch args.Phase {
 	case mapPhase:
-		reply = &OkReply{
-			Ok: m.mapOk,
-		}
+		reply.Ok = m.mapOk
 	case reducePhase:
-		reply = &OkReply{
-			Ok: m.reduceOk,
-		}
+		reply.Ok = m.reduceOk
 	}
 	return nil
 }
@@ -192,6 +196,9 @@ func (m *Master) Done() bool {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 	ret = m.reduceOk
+	if ret {
+		close(m.stop)
+	}
 	return ret
 }
 
@@ -220,11 +227,19 @@ func MakeMaster(files []string, nReduce int) *Master {
 	}
 	m.mReduces = reduces
 	m.mTasks = maps
+	m.stop = make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(11 * time.Second)
+		ticker := time.NewTicker(2 * time.Second)
 		for {
-			<-ticker.C
-			m.monitorTask()
+			select {
+
+			case <-ticker.C:
+				m.monitorTask()
+				log.Printf("mapok:%v,reduceok:%v", m.mapOk, m.reduceOk)
+			case <-m.stop:
+				return
+			}
+
 		}
 	}()
 	m.server()

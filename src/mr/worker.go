@@ -38,6 +38,17 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+func exists(path string) bool {
+	_, err := os.Stat(path) //os.Stat获取文件信息
+	if err != nil {
+		if os.IsExist(err) {
+			return true
+		}
+		return false
+	}
+	return true
+}
+
 //
 // main/mrworker.go calls this function.
 //
@@ -50,19 +61,26 @@ func Worker(mapf func(string, string) []KeyValue,
 	// CallExample()
 	ticker := time.NewTicker(time.Second)
 	log.Println("work run")
-	var mapOk bool
+	var mapOk = false
 	for {
 		<-ticker.C
 		if !mapOk {
-			log.Println("start call")
 			ok := CallPhaseOk(mapPhase)
-			log.Printf("work run ret:%v---\n", ok)
+			log.Printf("phaseok:%v\n", ok)
 			mapOk = ok
 		}
 		var task *TaskReply
 		if mapOk {
+			var reduceok bool
+			if !reduceok {
+				rok := CallPhaseOk(reducePhase)
+				reduceok = rok
+			} else {
+				return
+			}
 			task = CallGetTasks(reducePhase)
 			ri := task.Index
+			log.Printf("reduce index:%d\n", ri)
 			kva := []KeyValue{}
 			for i := 0; i < task.Nfiles; i++ {
 				filename := fmt.Sprintf("mr-%d-%d", i, ri)
@@ -78,9 +96,15 @@ func Worker(mapf func(string, string) []KeyValue,
 					}
 					kva = append(kva, kv)
 				}
+				file.Close()
 			}
-			oname := fmt.Sprintf("mr-out-%d", task.Index)
-			ofile, _ := os.Create(oname)
+			oname := fmt.Sprintf("mr-out-%d", ri)
+			var ofile *os.File
+			if !exists(oname) {
+				ofile, _ = os.Create(oname)
+			} else {
+				continue
+			}
 			sort.Sort(ByKey(kva))
 			i := 0
 			for i < len(kva) {
@@ -92,6 +116,9 @@ func Worker(mapf func(string, string) []KeyValue,
 				for k := i; k < j; k++ {
 					values = append(values, kva[k].Value)
 				}
+				if kva[i].Key == "ABOUT" {
+					fmt.Printf("-----about fileL%s\n", oname)
+				}
 				output := reducef(kva[i].Key, values)
 				fmt.Fprintf(ofile, "%v %v\n", kva[i].Key, output)
 				i = j
@@ -100,10 +127,13 @@ func Worker(mapf func(string, string) []KeyValue,
 
 			CallFinishTask(reducePhase, task.Index)
 		} else {
-			log.Println("get tasks begin")
+			log.Println("get map tasks begin")
 			task = CallGetTasks(mapPhase)
 			log.Printf("get tasks:%v\n", task)
 			filename := task.File
+			if filename == "" {
+				continue
+			}
 			file, err := os.Open(filename)
 			if err != nil {
 				log.Fatalf("cannot open %v", filename)
@@ -118,7 +148,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			for _, kv := range kva {
 				fi := ihash(kv.Key) % task.NReduce
 				outfname := fmt.Sprintf("mr-%d-%d", task.Index, fi)
-				outfile, _ := os.OpenFile(outfname, os.O_CREATE|os.O_WRONLY, os.ModePerm)
+				outfile, _ := os.OpenFile(outfname, os.O_CREATE|os.O_WRONLY|os.O_APPEND, os.ModePerm)
 				enc := json.NewEncoder(outfile)
 				err = enc.Encode(&kv)
 				if err != nil {
@@ -159,8 +189,7 @@ func CallGetTasks(phase string) *TaskReply {
 		Phase: phase,
 	}
 	reply := TaskReply{}
-	suc := call("Master.GetTasks", &args, &reply)
-	log.Printf("call api ret:%v", suc)
+	call("Master.GetTasks", &args, &reply)
 	return &reply
 }
 
